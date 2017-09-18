@@ -3,7 +3,6 @@ from queue import PriorityQueue
 from functools import partial, update_wrapper
 import datetime
 import time
-from time import monotonic as _time
 
 
 class Task:
@@ -231,7 +230,7 @@ class Task:
 
 
 class Scheduler(threading.Thread):
-    def __init__(self, timefunc=_time, delayfunc=time.sleep):
+    def __init__(self, timefunc=datetime.datetime.now, delayfunc=time.sleep):
         super().__init__()
         self._queue = PriorityQueue()
         self._lock = threading.RLock()
