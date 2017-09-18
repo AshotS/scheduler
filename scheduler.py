@@ -227,7 +227,6 @@ class Task:
             # __name__, __module__ or __doc__ and the update_wrapper()
             # call will fail.
             pass
-        self._schedule_next_run()
         return self
 
 
