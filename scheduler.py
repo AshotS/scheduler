@@ -1,21 +1,21 @@
 import threading
-from queue import PriorityQueue
+from queue import Queue, PriorityQueue
 from functools import partial, update_wrapper
 import datetime
 import time
-
+import os
 
 class Task:
     __slots__ = (
-    'periodic', 'next_run', 'last_run', 'priority', 'interval',
-    'unit', 'at_time', 'start_day', 'period', 'job_func')
+        'periodic', 'next_run', 'last_run', 'priority', 'interval',
+        'unit', 'at_time', 'start_day', 'period', 'job_func')
 
     def __init__(self):
         self.job_func = None
         self.periodic = None
         self.next_run = None
         self.last_run = None
-        self.priority = 1
+        self.priority = None
         self.interval = None
         self.period = None
         self.unit = None
@@ -37,9 +37,13 @@ class Task:
     def __ge__(s, o):
         return (s.next_run, s.priority) >= (o.next_run, o.priority)
 
-    @property
-    def once(self):
+    def set_priority(self, priority=1):
+        self.priority = priority
+        return self
+
+    def once(self, interval=1):
         self.periodic = False
+        self.interval = interval
         return self
 
     def every(self, interval=1):
@@ -163,8 +167,6 @@ class Task:
         """
         Compute the instant when this job should run next.
         """
-        if not self.periodic:
-            return
         assert self.unit in ('seconds', 'minutes', 'hours', 'days', 'weeks')
         self.period = datetime.timedelta(**{self.unit: self.interval})
         self.next_run = datetime.datetime.now() + self.period
@@ -230,13 +232,60 @@ class Task:
         return self
 
 
+
+class Worker(threading.Thread):
+    """ Thread executing tasks from a given tasks queue """
+    def __init__(self, tasks):
+        super().__init__()
+        self.tasks = tasks
+        self.daemon = True
+        self.start()
+
+    def run(self):
+        while True:
+            func = self.tasks.get()
+            try:
+                func()
+            except Exception as e:
+                # An exception happened in this thread
+                print(e)
+            finally:
+                # Mark this task as done, whether an exception happened or not
+                self.tasks.task_done()
+
+
+class ThreadPool:
+    """ Pool of threads consuming tasks from a queue """
+    def __init__(self, num_threads):
+        self.tasks = Queue(num_threads)
+        for _ in range(num_threads):
+            Worker(self.tasks)
+
+    def add_func(self, func):
+        """ Add a task to the queue """
+        self.tasks.put(func)
+
+    def wait_completion(self):
+        """ Wait for completion of all the tasks in the queue """
+        self.tasks.join()
+
+
 class Scheduler(threading.Thread):
-    def __init__(self, timefunc=datetime.datetime.now, delayfunc=time.sleep):
+    def __init__(self, max_workers=None, timefunc=datetime.datetime.now, delayfunc=time.sleep):
         super().__init__()
         self._queue = PriorityQueue()
         self._lock = threading.RLock()
         self.timefunc = timefunc
         self.delayfunc = delayfunc
+        self.daemon = True
+        self._active = True
+        if max_workers is None:
+            # Use this number because ThreadPoolExecutor is often
+            # used to overlap I/O instead of CPU work.
+            max_workers = (os.cpu_count() or 1) * 5
+        if max_workers <= 0:
+            raise ValueError("max_workers must be greater than 0")
+        self.pool = ThreadPool(max_workers)
 
     def add_task(self, task):
         assert isinstance(task, Task)
@@ -254,12 +303,16 @@ class Scheduler(threading.Thread):
         with self._lock:
             self._queue.queue = []
 
+    def stop(self):
+        self._active = False
+
     def run(self):
         lock = self._lock
         q = self._queue
         delayfunc = self.delayfunc
         timefunc = self.timefunc
-        while True:
+        pool = self.pool
+        while self._active:
             if not q.empty():
                 time = q.queue[0].next_run
                 now = timefunc()
@@ -271,6 +324,7 @@ class Scheduler(threading.Thread):
                         if task.periodic:
                             task._schedule_next_run()
                             q.put(task)
-                    task.job_func()
+                    pool.add_func(task.job_func)
+
             else:
                 delayfunc(1)
