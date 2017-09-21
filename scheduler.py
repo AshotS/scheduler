@@ -4,6 +4,8 @@ from functools import partial, update_wrapper
 import datetime
 import time
 import os
+import logging
+
 
 class Task:
     __slots__ = (
@@ -36,6 +38,33 @@ class Task:
 
     def __ge__(s, o):
         return (s.next_run, s.priority) >= (o.next_run, o.priority)
+
+    def __repr__(self):
+        def format_time(t):
+            return t.strftime('%Y-%m-%d %H:%M:%S') if t else '[never]'
+
+        timestats = '(last run: %s, next run: %s)' % (
+            format_time(self.last_run), format_time(self.next_run))
+
+        if hasattr(self.job_func, '__name__'):
+            job_func_name = self.job_func.__name__
+        else:
+            job_func_name = repr(self.job_func)
+        args = [repr(x) for x in self.job_func.args]
+        kwargs = ['%s=%s' % (k, repr(v))
+                  for k, v in self.job_func.keywords.items()]
+        call_repr = job_func_name + '(' + ', '.join(args + kwargs) + ')'
+
+        if self.at_time is not None:
+            return 'Every %s %s at %s do %s %s priority: %s' % (
+                self.interval,
+                self.unit[:-1] if self.interval == 1 else self.unit,
+                self.at_time, call_repr, timestats, self.priority)
+        else:
+            return 'Every %s %s do %s %s priority: %s' % (
+                self.interval,
+                self.unit[:-1] if self.interval == 1 else self.unit,
+                call_repr, timestats, self.priority)
 
     def set_priority(self, priority=1):
         self.priority = priority
@@ -232,9 +261,9 @@ class Task:
         return self
 
 
-
 class Worker(threading.Thread):
     """ Thread executing tasks from a given tasks queue """
+
     def __init__(self, tasks):
         super().__init__()
         self.tasks = tasks
@@ -246,9 +275,10 @@ class Worker(threading.Thread):
             func = self.tasks.get()
             try:
                 func()
+                logging.info('{} completed.'.format(self.__repr__()))
             except Exception as e:
                 # An exception happened in this thread
-                print(e)
+                logging.error('{} at \n {}'.format(e, self.__repr__()))
             finally:
                 # Mark this task as done, whether an exception happened or not
                 self.tasks.task_done()
@@ -256,6 +286,7 @@ class Worker(threading.Thread):
 
 class ThreadPool:
     """ Pool of threads consuming tasks from a queue """
+
     def __init__(self, num_threads):
         self.tasks = Queue(num_threads)
         for _ in range(num_threads):
@@ -291,22 +322,30 @@ class Scheduler(threading.Thread):
         assert isinstance(task, Task)
         with self._lock:
             self._queue.put(task)
+        logging.info('{} added.'.format(task.__repr__()))
 
     def cancel_task(self, task):
         with self._lock:
             try:
                 self._queue.queue.remove(task)
+                logging.info('{} canceled.'.format(task.__repr__()))
             except ValueError:
-                pass
+                logging.warning('{} not found.'.format(task.__repr__()))
+
+    def active_tasks(self):
+        return self._queue.queue[:]
 
     def clear(self):
         with self._lock:
             self._queue.queue = []
+            logging.info('Scheduler queue is cleaned.')
 
     def stop(self):
         self._active = False
+        logging.info('Scheduler stopped.')
 
     def run(self):
+        logging.info('Scheduler started.')
         lock = self._lock
         q = self._queue
         delayfunc = self.delayfunc
@@ -328,3 +367,6 @@ class Scheduler(threading.Thread):
 
             else:
                 delayfunc(1)
+
+
+from concurrent.futures import Executor
